@@ -1,0 +1,1547 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  onSnapshot 
+} from 'firebase/firestore';
+import { 
+  Cloud, 
+  Share2, 
+  Check, 
+  X, 
+  Trash2, 
+  Maximize2, 
+  Minimize2, 
+  Lock, 
+  Unlock, 
+  Copy, 
+  Send, 
+  Eye, 
+  Shield, 
+  RefreshCw, 
+  AlertCircle, 
+  CheckCircle2, 
+  Users, 
+  Sparkles, 
+  QrCode, 
+  Info,
+  KeyRound,
+  Layers,
+  ExternalLink
+} from 'lucide-react';
+
+// ============================================================================
+// CONFIGURAÇÃO DO FIREBASE (AMBIENTE COMPARTILHADO EM TEMPO REAL)
+// ============================================================================
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'ge-nuvem-palavras-app';
+let firebaseConfig = {};
+try {
+  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+    firebaseConfig = JSON.parse(__firebase_config);
+  }
+} catch (e) {
+  console.error("Erro ao ler configuração do Firebase:", e);
+}
+
+const app = Object.keys(firebaseConfig).length > 0 ? initializeApp(firebaseConfig) : null;
+const auth = app ? getAuth(app) : null;
+const db = app ? getFirestore(app) : null;
+
+// ============================================================================
+// FILTRO DE CONTEÚDO E UTILITÁRIOS
+// ============================================================================
+const OFFENSIVE_WORDS = [
+  'idiota', 'burro', 'imbecil', 'estupido', 'estúpido', 'lixo', 'merda', 
+  'porra', 'caralho', 'puta', 'fdp', 'bosta', 'desgraça', 'inutil', 'inútil',
+  'vagabundo', 'otario', 'otário', 'babaca', 'cretino', 'ridiculo', 'ridículo'
+];
+
+const isOffensive = (word) => {
+  const normalized = word
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return OFFENSIVE_WORDS.some(bad => normalized === bad || normalized.includes(bad));
+};
+
+// Paleta de cores elegante e harmônica para educação (tons de azul, verde, roxo, índigo, esmeralda)
+const WORD_PALETTE = [
+  '#1E40AF', // Blue 800
+  '#047857', // Emerald 700
+  '#6D28D9', // Violet 700
+  '#0E7490', // Cyan 700
+  '#4338CA', // Indigo 700
+  '#0F766E', // Teal 700
+  '#7E22CE', // Purple 700
+  '#1D4ED8', // Blue 700
+  '#0369A1', // Sky 700
+  '#3730A3', // Indigo 800
+];
+
+const getHash = (str) => {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = Math.imul(31, h) + str.charCodeAt(i) | 0;
+  }
+  return Math.abs(h);
+};
+
+// ============================================================================
+// COMPONENTE DE NUVEM DE PALAVRAS (ALGORITMO ESPIRAL SEM SOBREPOSIÇÃO)
+// ============================================================================
+const WordCloudCanvas = ({ words, isFullscreen }) => {
+  const containerRef = useRef(null);
+  const [dimensions, setDimensions] = useState({ width: 900, height: 560 });
+
+  useEffect(() => {
+    const updateSize = () => {
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        setDimensions({
+          width: Math.max(360, rect.width),
+          height: Math.max(320, rect.height)
+        });
+      }
+    };
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, [isFullscreen]);
+
+  // Calcula o posicionamento exato sem colisão usando espiral de Arquimedes
+  const layoutWords = useMemo(() => {
+    if (!words || words.length === 0) return [];
+
+    const W = dimensions.width;
+    const H = dimensions.height;
+    const maxCount = Math.max(...words.map(w => w.count), 1);
+    const minCount = Math.min(...words.map(w => w.count), 1);
+
+    // Ajusta escala conforme a quantidade de palavras e tamanho da tela
+    const scaleFactor = Math.min(W / 850, H / 520);
+    const countPenalty = words.length > 35 ? 0.78 : words.length > 20 ? 0.88 : 1;
+    const baseMinFont = Math.max(15, Math.round(20 * scaleFactor * countPenalty));
+    const baseMaxFont = Math.max(36, Math.round(68 * scaleFactor * countPenalty));
+
+    const sorted = [...words].sort((a, b) => b.count - a.count);
+    const placedBoxes = [];
+    const results = [];
+
+    sorted.forEach((item) => {
+      const ratio = maxCount === minCount ? 0.65 : (item.count - minCount) / (maxCount - minCount);
+      const fontSize = Math.round(baseMinFont + ratio * (baseMaxFont - baseMinFont));
+      const fontWeight = ratio > 0.6 ? 800 : ratio > 0.25 ? 700 : 600;
+
+      // Estimativa da caixa delimitadora (bounding box) da palavra com margem de segurança
+      const wordWidth = Math.ceil(item.display.length * fontSize * 0.58) + 22;
+      const wordHeight = Math.ceil(fontSize * 1.22) + 12;
+
+      let angle = (getHash(item.normalized) % 360) * (Math.PI / 180);
+      let radius = 0;
+      const step = 3.5;
+      const aspect = W / H;
+
+      let x = W / 2;
+      let y = H / 2;
+      let found = false;
+      let attempts = 0;
+
+      while (!found && attempts < 2200) {
+        x = (W / 2) + (radius * Math.cos(angle)) * aspect;
+        y = (H / 2) + (radius * Math.sin(angle));
+
+        const box = {
+          left: x - wordWidth / 2,
+          right: x + wordWidth / 2,
+          top: y - wordHeight / 2,
+          bottom: y + wordHeight / 2
+        };
+
+        const insideCanvas =
+          box.left >= 16 &&
+          box.right <= W - 16 &&
+          box.top >= 16 &&
+          box.bottom <= H - 16;
+
+        if (insideCanvas || attempts > 1400) {
+          let collision = false;
+          for (let i = 0; i < placedBoxes.length; i++) {
+            const p = placedBoxes[i];
+            if (
+              !(
+                box.right < p.left ||
+                box.left > p.right ||
+                box.bottom < p.top ||
+                box.top > p.bottom
+              )
+            ) {
+              collision = true;
+              break;
+            }
+          }
+
+          if (!collision) {
+            placedBoxes.push(box);
+            found = true;
+          }
+        }
+
+        angle += 0.32;
+        radius += step * 0.14;
+        attempts++;
+      }
+
+      // Garante que mesmo em telas muito cheias a palavra não saia das bordas
+      const clampedX = Math.max(wordWidth / 2 + 10, Math.min(W - wordWidth / 2 - 10, x));
+      const clampedY = Math.max(wordHeight / 2 + 10, Math.min(H - wordHeight / 2 - 10, y));
+
+      const color = WORD_PALETTE[getHash(item.normalized) % WORD_PALETTE.length];
+
+      results.push({
+        ...item,
+        x: clampedX,
+        y: clampedY,
+        fontSize,
+        fontWeight,
+        color
+      });
+    });
+
+    return results;
+  }, [words, dimensions]);
+
+  return (
+    <div 
+      ref={containerRef} 
+      className="relative w-full h-full flex items-center justify-center overflow-hidden select-none"
+    >
+      {/* Grade decorativa sutil ao fundo */}
+      <div 
+        className="absolute inset-0 opacity-35 pointer-events-none"
+        style={{
+          backgroundImage: 'radial-gradient(#CBD5E1 1px, transparent 1px)',
+          backgroundSize: '24px 24px'
+        }}
+      />
+
+      {layoutWords.length === 0 ? (
+        <div className="relative z-10 text-center max-w-md px-6 py-12">
+          <div className="w-20 h-20 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto mb-5 text-blue-600 shadow-sm">
+            <Cloud className="w-10 h-10 animate-pulse" />
+          </div>
+          <h3 className="text-xl font-semibold text-slate-800 mb-2">
+            A nuvem de palavras está pronta!
+          </h3>
+          <p className="text-slate-500 text-sm leading-relaxed">
+            Compartilhe o link de participação com os cursistas. Assim que as palavras forem enviadas e aprovadas no painel ao lado, elas aparecerão aqui automaticamente em tempo real.
+          </p>
+        </div>
+      ) : (
+        <svg 
+          width={dimensions.width} 
+          height={dimensions.height} 
+          className="relative z-10 w-full h-full"
+        >
+          <g>
+            {layoutWords.map((w) => (
+              <g
+                key={w.normalized}
+                transform={`translate(${w.x}, ${w.y})`}
+                style={{
+                  transition: 'transform 0.65s cubic-bezier(0.22, 1, 0.36, 1)'
+                }}
+              >
+                <text
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  fill={w.color}
+                  style={{
+                    fontSize: `${w.fontSize}px`,
+                    fontWeight: w.fontWeight,
+                    fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+                    transition: 'font-size 0.5s ease, fill 0.3s ease',
+                    filter: w.count > 1 ? 'drop-shadow(0px 2px 4px rgba(15, 23, 42, 0.06))' : 'none'
+                  }}
+                  className="cursor-default hover:opacity-80 transition-opacity"
+                >
+                  {w.display}
+                  <title>{`${w.display} (${w.count} ${w.count === 1 ? 'menção' : 'menções'})`}</title>
+                </text>
+              </g>
+            ))}
+          </g>
+        </svg>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// COMPONENTE PRINCIPAL DA APLICAÇÃO
+// ============================================================================
+export default function App() {
+  // Identificação de parâmetros da URL ou escolha direta na tela
+  const initialParams = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlRoom = params.get('room');
+    const urlRole = params.get('role');
+    const urlKey = params.get('key');
+
+    const roomId = urlRoom || 'ge-ilha-principal';
+    // Se não vier role explícito na URL, abre direto na tela do CURSISTA por segurança
+    // (assim qualquer cursista que abrir o link compartilhado cai direto no formulário!)
+    const role = urlRole === 'moderator' ? 'moderator' : 'participant';
+    const modKey = urlKey || 'mod-ge-2026';
+
+    return { roomId, role, modKey, hasExplicitRole: Boolean(urlRole) };
+  }, []);
+
+  const [roomId, setRoomId] = useState(initialParams.roomId);
+  const [role, setRole] = useState(initialParams.role);
+  const [modKey] = useState(initialParams.modKey);
+  const [previewingParticipant, setPreviewingParticipant] = useState(false);
+  const [showModPinModal, setShowModPinModal] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState('');
+
+  // Estados de Autenticação e Banco em Tempo Real
+  const [user, setUser] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState('connecting'); // connecting | connected | error
+  const [roomState, setRoomState] = useState({
+    status: 'open', // open | closed
+    autoApprove: false,
+    theme: 'O que vejo quando saio da minha ilha do GE?',
+    modKey: initialParams.modKey
+  });
+  const [wordsList, setWordsList] = useState([]);
+
+  // Estados de Interface do Moderador
+  const [activeTab, setActiveTab] = useState('pending'); // pending | approved
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [confirmClearModal, setConfirmClearModal] = useState(false);
+  const [linksModalOpen, setLinksModalOpen] = useState(false);
+  const [changeRoomModal, setChangeRoomModal] = useState(false);
+  const [customRoomInput, setCustomRoomInput] = useState('');
+
+  // Estados de Interface do Cursista
+  const [inputWord, setInputWord] = useState('');
+  const [submitState, setSubmitState] = useState('idle'); // idle | sending | success | error
+  const [errorMessage, setErrorMessage] = useState('');
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast((prev) => (prev?.message === message ? null : prev));
+    }, 3500);
+  };
+
+  // 1. Autenticação obrigatória antes das queries no Firestore (Regra 3)
+  useEffect(() => {
+    if (!auth) {
+      setConnectionStatus('error');
+      return;
+    }
+
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error('Erro na autenticação Firebase:', err);
+        setConnectionStatus('error');
+      }
+    };
+
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser) {
+        setUser(currentUser);
+        setConnectionStatus('connected');
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Sincronização em Tempo Real com o Firestore (Regra 1 e 2)
+  useEffect(() => {
+    if (!user || !db) return;
+
+    // Documento de configuração da sala
+    const roomDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'ge_rooms', roomId);
+    const unsubRoom = onSnapshot(
+      roomDocRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          setRoomState(snapshot.data());
+        } else {
+          // Cria automaticamente a sala se ainda não existir
+          const initialRoomData = {
+            roomId,
+            status: 'open',
+            autoApprove: false,
+            theme: 'O que vejo quando saio da minha ilha do GE?',
+            modKey,
+            createdAt: Date.now()
+          };
+          setDoc(roomDocRef, initialRoomData).catch((e) =>
+            console.error('Erro ao criar sala automática:', e)
+          );
+        }
+      },
+      (error) => {
+        console.error('Erro ao escutar status da sala:', error);
+      }
+    );
+
+    // Coleção de contribuições (palavras)
+    const wordsColRef = collection(db, 'artifacts', appId, 'public', 'data', `ge_words_${roomId}`);
+    const unsubWords = onSnapshot(
+      wordsColRef,
+      (snapshot) => {
+        const loaded = [];
+        snapshot.forEach((docSnap) => {
+          loaded.push({ id: docSnap.id, ...docSnap.data() });
+        });
+        // Ordenação em memória do mais recente para o mais antigo (Regra 2)
+        loaded.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        setWordsList(loaded);
+      },
+      (error) => {
+        console.error('Erro ao escutar palavras em tempo real:', error);
+      }
+    );
+
+    return () => {
+      unsubRoom();
+      unsubWords();
+    };
+  }, [user, roomId, modKey]);
+
+  // Links de acesso gerados automaticamente para a sala atual
+  const baseUrl = useMemo(() => {
+    return `${window.location.origin}${window.location.pathname}`;
+  }, []);
+
+  const participantLink = `${baseUrl}?room=${encodeURIComponent(roomId)}&role=participant`;
+  const moderatorLink = `${baseUrl}?room=${encodeURIComponent(roomId)}&role=moderator&key=${encodeURIComponent(modKey)}`;
+
+  // Função segura de cópia para área de transferência
+  const copyToClipboard = (text, label = 'Link copiado com sucesso!') => {
+    try {
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-9999px';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      showToast(label, 'success');
+    } catch (e) {
+      showToast('Não foi possível copiar automaticamente.', 'error');
+    }
+  };
+
+  // Acesso ao painel do moderador via PIN (padrão: 2026) ou direto
+  const handleUnlockModerator = (e) => {
+    e.preventDefault();
+    if (pinInput.trim() === '2026' || pinInput.trim().toLowerCase() === 'ge') {
+      setRole('moderator');
+      setPreviewingParticipant(false);
+      setShowModPinModal(false);
+      setPinInput('');
+      setPinError('');
+    } else {
+      setPinError('Código incorreto. Digite 2026 para acessar o painel.');
+    }
+  };
+
+  // ============================================================================
+  // AÇÕES DO CURSISTA (ENVIO DE PALAVRA)
+  // ============================================================================
+  const handleSendWord = async (e) => {
+    e.preventDefault();
+    if (!user || !db) {
+      setErrorMessage('Aguardando conexão com o servidor em tempo real...');
+      setSubmitState('error');
+      return;
+    }
+
+    if (roomState.status === 'closed') {
+      setErrorMessage('Esta atividade foi encerrada pelo moderador.');
+      setSubmitState('error');
+      return;
+    }
+
+    // Remove espaços desnecessários antes e depois
+    const trimmed = inputWord.trim();
+
+    if (!trimmed) {
+      setErrorMessage('Por favor, digite uma palavra antes de enviar.');
+      setSubmitState('error');
+      return;
+    }
+
+    // Verifica se há apenas uma única palavra (sem espaços internos)
+    if (/\s+/.test(trimmed)) {
+      setErrorMessage('Digite apenas uma única palavra por envio (sem espaços).');
+      setSubmitState('error');
+      return;
+    }
+
+    // Verifica caracteres mínimos e máximos
+    if (trimmed.length < 2 || trimmed.length > 28) {
+      setErrorMessage('A palavra deve conter entre 2 e 28 letras.');
+      setSubmitState('error');
+      return;
+    }
+
+    // Não permite apenas números ou símbolos
+    if (!/^[a-zA-ZÀ-ÿ-]+$/.test(trimmed)) {
+      setErrorMessage('Use apenas letras (sem números ou símbolos especiais).');
+      setSubmitState('error');
+      return;
+    }
+
+    // Filtro de conteúdo ofensivo
+    if (isOffensive(trimmed)) {
+      setErrorMessage('Palavra não permitida. Por favor, mantenha um vocabulário respeitoso.');
+      setSubmitState('error');
+      return;
+    }
+
+    setSubmitState('sending');
+    setErrorMessage('');
+
+    try {
+      const normalized = trimmed.toLowerCase();
+      const displayWord =
+        trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+
+      const wordsColRef = collection(db, 'artifacts', appId, 'public', 'data', `ge_words_${roomId}`);
+      await addDoc(wordsColRef, {
+        word: displayWord,
+        normalized,
+        status: roomState.autoApprove ? 'approved' : 'pending',
+        createdAt: Date.now(),
+        senderId: user.uid
+      });
+
+      setInputWord('');
+      setSubmitState('success');
+    } catch (err) {
+      console.error('Erro ao enviar palavra:', err);
+      setErrorMessage('Ocorreu um erro ao enviar sua palavra. Tente novamente.');
+      setSubmitState('error');
+    }
+  };
+
+  // ============================================================================
+  // AÇÕES DO MODERADOR
+  // ============================================================================
+  const handleApproveWord = async (wordId) => {
+    if (!user || !db) return;
+    try {
+      const docRef = doc(db, 'artifacts', appId, 'public', 'data', `ge_words_${roomId}`, wordId);
+      await updateDoc(docRef, { status: 'approved', approvedAt: Date.now() });
+      showToast('Palavra aprovada e publicada na nuvem!');
+    } catch (e) {
+      console.error('Erro ao aprovar palavra:', e);
+    }
+  };
+
+  const handleApproveAllPending = async () => {
+    if (!user || !db) return;
+    const pending = wordsList.filter((w) => w.status === 'pending');
+    if (pending.length === 0) return;
+    try {
+      await Promise.all(
+        pending.map((w) =>
+          updateDoc(doc(db, 'artifacts', appId, 'public', 'data', `ge_words_${roomId}`, w.id), {
+            status: 'approved',
+            approvedAt: Date.now()
+          })
+        )
+      );
+      showToast(`${pending.length} palavras aprovadas com sucesso!`);
+    } catch (e) {
+      console.error('Erro ao aprovar todas:', e);
+    }
+  };
+
+  const handleDeleteOrRejectWord = async (wordId, isRejection = false) => {
+    if (!user || !db) return;
+    try {
+      const docRef = doc(db, 'artifacts', appId, 'public', 'data', `ge_words_${roomId}`, wordId);
+      await deleteDoc(docRef);
+      showToast(
+        isRejection ? 'Contribuição rejeitada e removida.' : 'Palavra excluída da nuvem.',
+        'info'
+      );
+    } catch (e) {
+      console.error('Erro ao excluir palavra:', e);
+    }
+  };
+
+  const handleToggleActivityStatus = async () => {
+    if (!user || !db) return;
+    const nextStatus = roomState.status === 'open' ? 'closed' : 'open';
+    try {
+      const roomDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'ge_rooms', roomId);
+      await setDoc(
+        roomDocRef,
+        { ...roomState, status: nextStatus, updatedAt: Date.now() },
+        { merge: true }
+      );
+      showToast(
+        nextStatus === 'open'
+          ? 'Recebimento de palavras reaberto!'
+          : 'Atividade encerrada para novas palavras.'
+      );
+    } catch (e) {
+      console.error('Erro ao alterar status da sala:', e);
+    }
+  };
+
+  const handleToggleAutoApprove = async () => {
+    if (!user || !db) return;
+    const nextAuto = !roomState.autoApprove;
+    try {
+      const roomDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'ge_rooms', roomId);
+      await setDoc(
+        roomDocRef,
+        { ...roomState, autoApprove: nextAuto, updatedAt: Date.now() },
+        { merge: true }
+      );
+      showToast(
+        nextAuto
+          ? 'Aprovação automática ativada!'
+          : 'Moderação manual antes da publicação ativada.'
+      );
+    } catch (e) {
+      console.error('Erro ao alterar aprovação automática:', e);
+    }
+  };
+
+  const handleClearCloud = async () => {
+    if (!user || !db) return;
+    try {
+      await Promise.all(
+        wordsList.map((w) =>
+          deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', `ge_words_${roomId}`, w.id))
+        )
+      );
+      setConfirmClearModal(false);
+      showToast('Nuvem limpa! Nova rodada iniciada.');
+    } catch (e) {
+      console.error('Erro ao limpar nuvem:', e);
+    }
+  };
+
+  const handleSwitchRoom = (e) => {
+    e.preventDefault();
+    const cleaned = customRoomInput
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-_]/g, '-');
+    if (!cleaned) return;
+    setRoomId(cleaned);
+    setChangeRoomModal(false);
+    setCustomRoomInput('');
+    showToast(`Conectado à sala: ${cleaned}`);
+  };
+
+  // ============================================================================
+  // PROCESSAMENTO E AGRUPAMENTO DE PALAVRAS PARA A NUVEM E PAINEL
+  // ============================================================================
+  const pendingWords = useMemo(
+    () => wordsList.filter((w) => w.status === 'pending'),
+    [wordsList]
+  );
+
+  const approvedWords = useMemo(
+    () => wordsList.filter((w) => w.status === 'approved'),
+    [wordsList]
+  );
+
+  // Agrupa palavras aprovadas por frequência para destacar na nuvem
+  const aggregatedCloudWords = useMemo(() => {
+    const map = new Map();
+    approvedWords.forEach((item) => {
+      const key = item.normalized || item.word.toLowerCase();
+      if (!map.has(key)) {
+        map.set(key, {
+          normalized: key,
+          display: item.word,
+          count: 1,
+          ids: [item.id]
+        });
+      } else {
+        const entry = map.get(key);
+        entry.count += 1;
+        entry.ids.push(item.id);
+      }
+    });
+    return Array.from(map.values());
+  }, [approvedWords]);
+
+  // ============================================================================
+  // RENDERIZAÇÃO: AMBIENTE DO CURSISTA
+  // ============================================================================
+  if (role === 'participant' || previewingParticipant) {
+    const isActivityClosed = roomState.status === 'closed';
+
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/40 to-emerald-50/40 flex flex-col justify-between font-sans text-slate-800">
+        {/* Barra superior de retorno caso o Moderador esteja apenas testando a visão do cursista */}
+        {previewingParticipant && (
+          <div className="bg-indigo-900 text-white px-4 py-2.5 text-xs sm:text-sm flex items-center justify-between shadow-md">
+            <div className="flex items-center gap-2">
+              <Eye className="w-4 h-4 text-indigo-300 shrink-0" />
+              <span>
+                <strong>Modo de Simulação:</strong> Você está visualizando exatamente a tela que os cursistas veem no celular ou computador.
+              </span>
+            </div>
+            <button
+              onClick={() => setPreviewingParticipant(false)}
+              className="bg-white text-indigo-900 hover:bg-indigo-50 font-semibold px-3 py-1 rounded-lg text-xs transition shrink-0 ml-3"
+            >
+              Voltar ao Painel do Moderador
+            </button>
+          </div>
+        )}
+
+        {/* Cabeçalho discreto institucional */}
+        <header className="w-full max-w-xl mx-auto pt-8 pb-2 px-6 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-teal-600 flex items-center justify-center text-white shadow-sm">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-xs font-bold uppercase tracking-wider text-blue-700 block">
+                Grupo de Educadores • GE
+              </span>
+              <span className="text-xs text-slate-500">
+                Atividade Formativa Interativa
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="hidden sm:flex items-center gap-1.5 text-xs font-medium text-slate-500 bg-white/80 backdrop-blur px-3 py-1.5 rounded-full border border-slate-200/80 shadow-sm">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  connectionStatus === 'connected' ? 'bg-emerald-500' : 'bg-amber-400 animate-ping'
+                }`}
+              />
+              <span>Sala: {roomId}</span>
+            </div>
+
+            {!previewingParticipant && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowModPinModal(true);
+                  setPinError('');
+                }}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-3 py-1.5 rounded-full shadow-xs transition cursor-pointer"
+                title="Abrir nuvem de palavras e aprovar respostas"
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span>Painel do Moderador</span>
+              </button>
+            )}
+          </div>
+        </header>
+
+        {/* Cartão Central de Participação do Cursista */}
+        <main className="flex-1 flex items-center justify-center p-4 sm:p-6">
+          <div className="w-full max-w-xl bg-white rounded-3xl shadow-xl shadow-slate-200/70 border border-slate-100 p-6 sm:p-10 transition-all">
+            {/* Tema Principal */}
+            <div className="mb-8 text-center sm:text-left">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-100 mb-4">
+                Reflexão Colaborativa
+              </span>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight leading-snug mb-3">
+                O que vejo quando saio da minha ilha do GE?
+              </h1>
+              <p className="text-slate-600 text-sm sm:text-base leading-relaxed">
+                Pense em uma palavra que represente o que você descobre, vivencia ou percebe quando sai da sua ilha e se conecta com outros educadores.
+              </p>
+            </div>
+
+            {/* Verifica se a atividade está encerrada */}
+            {isActivityClosed ? (
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-8 text-center">
+                <div className="w-14 h-14 rounded-2xl bg-slate-200/70 text-slate-600 flex items-center justify-center mx-auto mb-4">
+                  <Lock className="w-7 h-7" />
+                </div>
+                <h2 className="text-lg font-bold text-slate-800 mb-2">
+                  Esta atividade foi encerrada. Obrigado pela participação!
+                </h2>
+                <p className="text-sm text-slate-500">
+                  O moderador finalizou o recebimento de novas palavras para esta rodada. Acompanhe a nuvem de palavras na apresentação principal.
+                </p>
+              </div>
+            ) : submitState === 'success' ? (
+              /* Confirmação após envio e opção de enviar outra palavra */
+              <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-7 text-center animate-fade-in">
+                <div className="w-14 h-14 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto mb-4 shadow-sm">
+                  <CheckCircle2 className="w-8 h-8" />
+                </div>
+                <h2 className="text-xl font-bold text-emerald-950 mb-2">
+                  Sua palavra foi enviada com sucesso!
+                </h2>
+                <p className="text-sm text-emerald-800/80 mb-6">
+                  Sua contribuição já foi transmitida ao painel do moderador para compor a nossa nuvem coletiva.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSubmitState('idle');
+                    setInputWord('');
+                    setErrorMessage('');
+                  }}
+                  className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-sm shadow-sm transition cursor-pointer"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Enviar outra palavra
+                </button>
+              </div>
+            ) : (
+              /* Formulário de Envio de Palavra */
+              <form onSubmit={handleSendWord} className="space-y-5">
+                <div>
+                  <label
+                    htmlFor="palavra-input"
+                    className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2"
+                  >
+                    Sua Palavra (Apenas 1 palavra)
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="palavra-input"
+                      type="text"
+                      value={inputWord}
+                      onChange={(e) => {
+                        setInputWord(e.target.value);
+                        if (submitState === 'error') {
+                          setSubmitState('idle');
+                          setErrorMessage('');
+                        }
+                      }}
+                      placeholder="Ex: Empatia, Troca, Inovação..."
+                      maxLength={28}
+                      autoComplete="off"
+                      autoFocus
+                      className="w-full px-5 py-4 text-lg font-medium text-slate-900 bg-slate-50 border-2 border-slate-200 rounded-2xl focus:outline-none focus:border-blue-600 focus:bg-white transition placeholder:text-slate-400"
+                    />
+                    {inputWord.trim().length > 0 && (
+                      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-medium text-slate-400">
+                        {inputWord.trim().length}/28
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Mensagem de validação / erro */}
+                  {errorMessage && (
+                    <div className="mt-3 flex items-center gap-2 text-rose-600 bg-rose-50 border border-rose-200/80 px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-medium">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{errorMessage}</span>
+                    </div>
+                  )}
+
+                  <p className="mt-2.5 text-xs text-slate-400 flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      Digite apenas uma única palavra, sem espaços. Espaços extras antes ou depois são ignorados automaticamente.
+                    </span>
+                  </p>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={submitState === 'sending'}
+                  className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-teal-600 hover:from-blue-700 hover:via-indigo-700 hover:to-teal-700 text-white font-bold text-base tracking-wide shadow-lg shadow-blue-600/20 hover:shadow-blue-600/30 active:scale-[0.99] transition flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-60"
+                >
+                  <Send className="w-5 h-5" />
+                  <span>
+                    {submitState === 'sending' ? 'ENVIANDO...' : 'ENVIAR PALAVRA'}
+                  </span>
+                </button>
+              </form>
+            )}
+          </div>
+        </main>
+
+        {/* Rodapé com acesso protegido para o Moderador */}
+        <footer className="w-full max-w-xl mx-auto py-6 px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+          <span>Formação de Professores • Ambiente exclusivo do Cursista</span>
+          {!previewingParticipant && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowModPinModal(true);
+                setPinError('');
+              }}
+              className="inline-flex items-center gap-1.5 text-slate-500 hover:text-blue-700 font-medium px-3 py-1.5 rounded-lg hover:bg-white/80 transition cursor-pointer"
+            >
+              <Shield className="w-3.5 h-3.5" />
+              <span>Sou o Moderador (Acessar Painel)</span>
+            </button>
+          )}
+        </footer>
+
+        {/* Modal de Senha/PIN do Moderador */}
+        {showModPinModal && (
+          <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-slate-100">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                    <KeyRound className="w-5 h-5" />
+                  </div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Acesso do Moderador
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setShowModPinModal(false)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 mb-4">
+                Digite o PIN de formador para abrir a nuvem de palavras e o painel de aprovação (PIN padrão: <strong>2026</strong>).
+              </p>
+              <form onSubmit={handleUnlockModerator} className="space-y-3">
+                <input
+                  type="password"
+                  value={pinInput}
+                  onChange={(e) => {
+                    setPinInput(e.target.value);
+                    setPinError('');
+                  }}
+                  placeholder="Digite o PIN (2026)"
+                  autoFocus
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-blue-600"
+                />
+                {pinError && (
+                  <p className="text-xs text-rose-600 font-medium">{pinError}</p>
+                )}
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowModPinModal(false)}
+                    className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer"
+                  >
+                    Entrar como Moderador
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // RENDERIZAÇÃO: AMBIENTE DO MODERADOR
+  // ============================================================================
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans">
+      {/* Notificação Flutuante (Toast) */}
+      {toast && (
+        <div className="fixed bottom-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-lg border bg-slate-900 text-white border-slate-700 text-sm font-medium animate-bounce">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{toast.message}</span>
+        </div>
+      )}
+
+      {/* CABEÇALHO DO MODERADOR (Oculto em modo Tela Cheia da Nuvem) */}
+      {!isFullscreen && (
+        <header className="bg-white border-b border-slate-200/80 px-4 sm:px-6 py-3.5 sticky top-0 z-30 shadow-xs">
+          <div className="max-w-[1600px] mx-auto flex flex-wrap items-center justify-between gap-4">
+            {/* Identidade e Sala */}
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 via-indigo-600 to-teal-600 flex items-center justify-center text-white shadow-sm">
+                <Cloud className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-blue-700">
+                    Painel do Moderador • GE
+                  </span>
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                      roomState.status === 'open'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-rose-50 text-rose-700 border border-rose-200'
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        roomState.status === 'open' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'
+                      }`}
+                    />
+                    {roomState.status === 'open' ? 'Atividade Aberta' : 'Atividade Encerrada'}
+                  </span>
+                </div>
+                <h1 className="text-base sm:text-lg font-bold text-slate-900 leading-tight">
+                  O que vejo quando saio da minha ilha do GE?
+                </h1>
+              </div>
+            </div>
+
+            {/* Ações Rápidas do Moderador */}
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Botão de Instrução de Compartilhamento Real */}
+              <button
+                onClick={() => setLinksModalOpen(true)}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs sm:text-sm shadow-xs transition cursor-pointer"
+              >
+                <Share2 className="w-4 h-4" />
+                <span>Como Compartilhar com Cursistas</span>
+              </button>
+
+              {/* Simular visão do Cursista */}
+              <button
+                onClick={() => setPreviewingParticipant(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/60 font-medium text-xs sm:text-sm transition cursor-pointer"
+                title="Ir para a tela de envio de palavras dos cursistas"
+              >
+                <Eye className="w-4 h-4" />
+                <span>Ver Tela do Cursista</span>
+              </button>
+
+              {/* Abrir/Encerrar Recebimento */}
+              <button
+                onClick={handleToggleActivityStatus}
+                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl font-semibold text-xs sm:text-sm border transition cursor-pointer ${
+                  roomState.status === 'open'
+                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
+                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
+                }`}
+              >
+                {roomState.status === 'open' ? (
+                  <>
+                    <Lock className="w-4 h-4" />
+                    <span>Encerrar Envios</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlock className="w-4 h-4" />
+                    <span>Reabrir Envios</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </header>
+      )}
+
+      {/* ÁREA PRINCIPAL DIVIDIDA: NUVEM CENTRAL + PAINEL DE MODERAÇÃO */}
+      <main
+        className={`flex-1 max-w-[1600px] w-full mx-auto grid grid-cols-1 ${
+          isFullscreen ? 'lg:grid-cols-1 p-0' : 'lg:grid-cols-12 gap-5 p-4 sm:p-6'
+        }`}
+      >
+        {/* COLUNA ESQUERDA/CENTRAL: NUVEM DE PALAVRAS EM TEMPO REAL */}
+        <section
+          className={`${
+            isFullscreen
+              ? 'fixed inset-0 z-40 bg-white flex flex-col'
+              : 'lg:col-span-8 flex flex-col bg-white rounded-3xl border border-slate-200/90 shadow-xs overflow-hidden min-h-[480px] lg:min-h-[640px]'
+          }`}
+        >
+          {/* Barra superior da Nuvem */}
+          <div className="px-6 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3 bg-gradient-to-r from-white via-slate-50/50 to-white">
+            <div>
+              <span className="text-xs font-bold uppercase tracking-wider text-teal-700 block">
+                Construção Coletiva em Tempo Real
+              </span>
+              <h2
+                className={`font-extrabold text-slate-900 ${
+                  isFullscreen ? 'text-2xl sm:text-3xl' : 'text-lg sm:text-xl'
+                }`}
+              >
+                “O que vejo quando saio da minha ilha do GE?”
+              </h2>
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              {/* Indicador de Palavras Publicadas na Nuvem */}
+              <div className="bg-slate-100 text-slate-700 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                <span>{approvedWords.length} publicadas</span>
+                <span className="text-slate-400">•</span>
+                <span>{aggregatedCloudWords.length} únicas</span>
+              </div>
+
+              {/* Botão de Tela Cheia para Apresentações */}
+              <button
+                onClick={() => setIsFullscreen(!isFullscreen)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition cursor-pointer shadow-xs"
+                title={
+                  isFullscreen
+                    ? 'Sair da tela cheia'
+                    : 'Expandir nuvem em tela cheia para projetor ou compartilhamento de tela'
+                }
+              >
+                {isFullscreen ? (
+                  <>
+                    <Minimize2 className="w-4 h-4" />
+                    <span>Sair da Tela Cheia</span>
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="w-4 h-4" />
+                    <span>Tela Cheia</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Canvas Dinâmico da Nuvem de Palavras */}
+          <div className="flex-1 relative bg-gradient-to-b from-white to-slate-50/60">
+            <WordCloudCanvas words={aggregatedCloudWords} isFullscreen={isFullscreen} />
+          </div>
+
+          {/* Rodapé informativo na tela cheia */}
+          {isFullscreen && (
+            <div className="px-6 py-3 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-4 text-xs">
+              <div className="flex items-center gap-3">
+                <span className="font-semibold text-blue-300">
+                  Link de Participação dos Cursistas:
+                </span>
+                <code className="bg-slate-800 px-2.5 py-1 rounded text-slate-200">
+                  {participantLink}
+                </code>
+                <button
+                  onClick={() =>
+                    copyToClipboard(participantLink, 'Link copiado!')
+                  }
+                  className="bg-blue-600 hover:bg-blue-500 px-2.5 py-1 rounded font-medium transition cursor-pointer"
+                >
+                  Copiar
+                </button>
+              </div>
+              <div className="flex items-center gap-4">
+                <span>
+                  Total recebidas: <strong>{wordsList.length}</strong>
+                </span>
+                {pendingWords.length > 0 && (
+                  <span className="bg-amber-500/20 text-amber-300 border border-amber-400/30 px-2.5 py-0.5 rounded-full">
+                    {pendingWords.length} aguardando aprovação
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* COLUNA DIREITA: PAINEL DE MODERAÇÃO E ADMINISTRAÇÃO */}
+        {!isFullscreen && (
+          <aside className="lg:col-span-4 flex flex-col gap-5">
+            {/* Cartão de Resumo e Métricas */}
+            <div className="bg-white rounded-3xl border border-slate-200/90 p-5 shadow-xs">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Shield className="w-4 h-4 text-blue-600" />
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-slate-700">
+                    Controle & Métricas
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setChangeRoomModal(true)}
+                  className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 cursor-pointer"
+                  title="Trocar ou criar novo código de sala"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Sala: {roomId}</span>
+                </button>
+              </div>
+
+              {/* Contadores */}
+              <div className="grid grid-cols-3 gap-2.5 mb-4">
+                <div className="bg-slate-50 border border-slate-200/70 rounded-2xl p-3 text-center">
+                  <span className="text-2xl font-extrabold text-slate-900 block">
+                    {wordsList.length}
+                  </span>
+                  <span className="text-[11px] font-semibold text-slate-500 uppercase">
+                    Total Recebidas
+                  </span>
+                </div>
+                <div className="bg-amber-50/70 border border-amber-200/70 rounded-2xl p-3 text-center">
+                  <span className="text-2xl font-extrabold text-amber-700 block">
+                    {pendingWords.length}
+                  </span>
+                  <span className="text-[11px] font-semibold text-amber-700 uppercase">
+                    Pendentes
+                  </span>
+                </div>
+                <div className="bg-emerald-50/70 border border-emerald-200/70 rounded-2xl p-3 text-center">
+                  <span className="text-2xl font-extrabold text-emerald-700 block">
+                    {approvedWords.length}
+                  </span>
+                  <span className="text-[11px] font-semibold text-emerald-700 uppercase">
+                    Na Nuvem
+                  </span>
+                </div>
+              </div>
+
+              {/* Opção de Aprovação Automática ou Manual */}
+              <div className="flex items-center justify-between px-3.5 py-2.5 rounded-2xl bg-slate-50 border border-slate-200/60 text-xs">
+                <div>
+                  <span className="font-semibold text-slate-700 block">
+                    Publicação Direta (Auto-aprovar)
+                  </span>
+                  <span className="text-slate-500 text-[11px]">
+                    {roomState.autoApprove
+                      ? 'Novas palavras entram direto na nuvem'
+                      : 'Exige aprovação manual do moderador'}
+                  </span>
+                </div>
+                <button
+                  onClick={handleToggleAutoApprove}
+                  className={`w-11 h-6 rounded-full transition-colors p-0.5 cursor-pointer ${
+                    roomState.autoApprove ? 'bg-blue-600' : 'bg-slate-300'
+                  }`}
+                >
+                  <div
+                    className={`w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                      roomState.autoApprove ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {/* Lista de Contribuições (Aprovar, Rejeitar, Excluir) */}
+            <div className="bg-white rounded-3xl border border-slate-200/90 shadow-xs flex-1 flex flex-col overflow-hidden min-h-[380px]">
+              {/* Abas Pendentes vs Publicadas */}
+              <div className="grid grid-cols-2 border-b border-slate-200 bg-slate-50/60 p-1.5 gap-1.5">
+                <button
+                  onClick={() => setActiveTab('pending')}
+                  className={`py-2.5 px-3 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+                    activeTab === 'pending'
+                      ? 'bg-white text-slate-900 shadow-xs border border-slate-200/80'
+                      : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <span>Para Aprovar</span>
+                  {pendingWords.length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full text-[11px] bg-amber-500 text-white">
+                      {pendingWords.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('approved')}
+                  className={`py-2.5 px-3 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+                    activeTab === 'approved'
+                      ? 'bg-white text-slate-900 shadow-xs border border-slate-200/80'
+                      : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <span>Publicadas</span>
+                  <span className="px-2 py-0.5 rounded-full text-[11px] bg-emerald-100 text-emerald-800">
+                    {approvedWords.length}
+                  </span>
+                </button>
+              </div>
+
+              {/* Barra de Ação em Lote (Aprovar Todas) */}
+              {activeTab === 'pending' && pendingWords.length > 1 && (
+                <div className="px-4 py-2.5 bg-amber-50/60 border-b border-amber-200/60 flex items-center justify-between">
+                  <span className="text-xs font-medium text-amber-800">
+                    {pendingWords.length} palavras aguardando
+                  </span>
+                  <button
+                    onClick={handleApproveAllPending}
+                    className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Aprovar Todas</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Lista Rolável de Palavras */}
+              <div className="flex-1 overflow-y-auto divide-y divide-slate-100 p-3 max-h-[380px]">
+                {activeTab === 'pending' ? (
+                  pendingWords.length === 0 ? (
+                    <div className="py-12 px-4 text-center">
+                      <p className="text-sm font-medium text-slate-500 mb-1">
+                        Nenhuma palavra pendente no momento.
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Novas contribuições enviadas pelos cursistas aparecerão aqui instantaneamente para sua aprovação.
+                      </p>
+                    </div>
+                  ) : (
+                    pendingWords.map((item) => (
+                      <div
+                        key={item.id}
+                        className="py-2.5 px-3 flex items-center justify-between gap-2 hover:bg-slate-50 rounded-xl transition"
+                      >
+                        <div>
+                          <span className="font-bold text-slate-800 text-sm block">
+                            {item.word}
+                          </span>
+                          <span className="text-[11px] text-slate-400">
+                            Aguardando moderação
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => handleApproveWord(item.id)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition cursor-pointer shadow-xs"
+                            title="Aprovar e publicar na nuvem"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Aprovar</span>
+                          </button>
+                          <button
+                            onClick={() => handleDeleteOrRejectWord(item.id, true)}
+                            className="p-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 transition cursor-pointer"
+                            title="Rejeitar palavra"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )
+                ) : approvedWords.length === 0 ? (
+                  <div className="py-12 px-4 text-center">
+                    <p className="text-sm font-medium text-slate-500 mb-1">
+                      Nenhuma palavra publicada ainda.
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      Aprove as palavras na aba "Para Aprovar" para exibi-las na nuvem.
+                    </p>
+                  </div>
+                ) : (
+                  approvedWords.map((item) => (
+                    <div
+                      key={item.id}
+                      className="py-2.5 px-3 flex items-center justify-between gap-2 hover:bg-slate-50 rounded-xl transition"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                        <span className="font-semibold text-slate-800 text-sm">
+                          {item.word}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteOrRejectWord(item.id, false)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                        title="Excluir palavra publicada da nuvem"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Rodapé do Painel: Limpar Nuvem e Nova Rodada */}
+              <div className="p-3.5 bg-slate-50 border-t border-slate-200/80 flex items-center justify-between">
+                <span className="text-xs text-slate-500">
+                  Deseja reiniciar a dinâmica?
+                </span>
+                <button
+                  onClick={() => setConfirmClearModal(true)}
+                  disabled={wordsList.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-rose-50 text-rose-600 border border-slate-200 hover:border-rose-200 text-xs font-semibold transition cursor-pointer disabled:opacity-40 disabled:pointer-events-none"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Limpar Nuvem / Nova Rodada</span>
+                </button>
+              </div>
+            </div>
+          </aside>
+        )}
+      </main>
+
+      {/* ====================================================================
+          MODAL: CONFIRMAÇÃO PARA LIMPAR A NUVEM (SEM USAR ALERT/CONFIRM)
+          ==================================================================== */}
+      {confirmClearModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
+            <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mb-4">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <h3 className="text-lg font-bold text-slate-900 mb-2">
+              Limpar nuvem e iniciar nova rodada?
+            </h3>
+            <p className="text-sm text-slate-600 mb-6 leading-relaxed">
+              Todas as <strong>{wordsList.length} contribuições</strong> atuais (pendentes e publicadas) serão removidas para iniciar uma nova rodada limpa na sala <strong>{roomId}</strong>.
+            </p>
+            <div className="flex items-center justify-end gap-2.5">
+              <button
+                onClick={() => setConfirmClearModal(false)}
+                className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleClearCloud}
+                className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold transition cursor-pointer"
+              >
+                Sim, Limpar Nuvem
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          MODAL: LINKS EXCLUSIVOS E QR CODE DE PARTICIPAÇÃO
+          ==================================================================== */}
+      {linksModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                  <Share2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">
+                    Como enviar o link aos Cursistas
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Sala ativa: <strong>{roomId}</strong>
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setLinksModalOpen(false)}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-5 text-xs sm:text-sm text-amber-950 space-y-2 leading-relaxed">
+              <p className="font-bold text-amber-900 flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                Por que o link <code>scf.usercontent.goog</code> dá erro?
+              </p>
+              <p>
+                Esse endereço enorme é apenas a janela interna privada da sua conta. Para gerar o <strong>link público real</strong> que abre no celular ou computador de qualquer cursista:
+              </p>
+              <ol className="list-decimal list-inside space-y-1 font-medium text-amber-900 pt-1">
+                <li>
+                  Olhe para o <strong>topo direito</strong> da janela do Gemini (acima desta tela) e clique no botão <strong>Compartilhar (Share)</strong> → <strong>Compartilhar app / Criar link público</strong>.
+                </li>
+                <li>
+                  Envie esse link gerado pelo Gemini para os cursistas no WhatsApp ou Meet.
+                </li>
+                <li>
+                  <strong>Pronto!</strong> Ao abrirem o link, eles já cairão <strong>diretamente na tela de Cursista</strong> (sem ver a nuvem nem o painel).
+                </li>
+              </ol>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 text-xs text-slate-600 space-y-1.5">
+              <p className="font-bold text-slate-800">
+                Como você entra no Painel do Moderador?
+              </p>
+              <p>
+                Como a aplicação agora abre por padrão no modo <strong>Cursista</strong> para facilitar a vida dos professores, basta clicar em <strong>"Sou o Moderador (Acessar Painel)"</strong> no rodapé e digitar o PIN <strong>2026</strong>.
+              </p>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-slate-100 flex justify-end">
+              <button
+                onClick={() => setLinksModalOpen(false)}
+                className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition cursor-pointer"
+              >
+                Entendi
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          MODAL: CRIAR OU ALTERAR SALA DE ATIVIDADE
+          ==================================================================== */}
+      {changeRoomModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
+            <h3 className="text-lg font-bold text-slate-900 mb-1">
+              Gerenciar Sala de Participação
+            </h3>
+            <p className="text-xs text-slate-500 mb-4">
+              A sala atual é <strong>{roomId}</strong>. Você pode criar um código personalizado para separar turmas diferentes de formadores.
+            </p>
+            <form onSubmit={handleSwitchRoom} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-600 mb-1">
+                  Código da Sala
+                </label>
+                <input
+                  type="text"
+                  value={customRoomInput}
+                  onChange={(e) => setCustomRoomInput(e.target.value)}
+                  placeholder="Ex: ge-turma-manha"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-blue-600"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setChangeRoomModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 text-xs font-semibold"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold"
+                >
+                  Acessar Sala
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
